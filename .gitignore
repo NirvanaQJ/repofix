@@ -1,0 +1,75 @@
+# Secrets and local private configuration; sanitized example may be tracked.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+/credentials.json
+/credentials.*.json
+/secrets/
+/private-config/
+*.local.toml
+*.local.yaml
+*.local.yml
+
+# Python environments, caches, coverage, and build output.
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+.eggs/
+wheelhouse/
+
+# Editor and OS temporary files.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local databases, including WAL, SHM, and journal sidecars.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Local execution, containers, and downloaded upstream repositories.
+/runtime/
+/workspaces/
+/container-data/
+/upstream/
+
+# Raw/unredacted artifacts; do not ignore all experiments or JSON/CSV files.
+/raw-logs/
+/raw-model-io/
+/experiments/**/runs/
+/experiments/**/raw/
+
+# Private data and evaluator-only material; ignore rules are not access control.
+/private/
+/data/private/
+/answers/
+/hidden-tests/

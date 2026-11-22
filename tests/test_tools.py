@@ -1,5 +1,5 @@
 import pytest
-from repofix.tools import read_file, run_read_file, list_symbols
+from repofix.tools import read_file, run_read_file, list_symbols, search_code
 
 
 def test_read_file(tmp_path):
@@ -105,3 +105,29 @@ def test_list_symbols(tmp_path):
 
     with pytest.raises(ValueError, match="文件过大"):
         list_symbols(tmp_path, "large.py", max_bytes=2)
+
+def test_search_code(tmp_path):
+    source = "alpha\n\n  beta alpha alpha\nALPHA\nx.y\nxay\n"
+    (tmp_path / "sample.py").write_text(source, encoding="utf-8")
+
+    assert search_code(tmp_path, "sample.py", "alpha") == [
+        {"line": 1, "text": "alpha"},
+        {"line": 3, "text": "  beta alpha alpha"},
+    ]
+
+    assert search_code(tmp_path, "sample.py", "missing") == []
+
+    assert search_code(tmp_path, "sample.py", ".") == [{"line": 5, "text": "x.y"}]
+
+
+def test_search_code_boundaries(tmp_path):
+    (tmp_path / "sample.py").write_text("alpha\n", encoding="utf-8")
+
+    for invalid_query in ["", None, 1, []]:
+        with pytest.raises(ValueError):
+            search_code(tmp_path, "sample.py", invalid_query)
+    assert search_code(tmp_path, "sample.py", "alpha", 6)==[{"line": 1, "text": "alpha"}]
+
+    with pytest.raises(ValueError,match="文件过大"):search_code(tmp_path, "sample.py", "alpha", 5)
+    with pytest.raises(FileNotFoundError):search_code(tmp_path, "missing.py", "alpha")
+    with pytest.raises(ValueError,match="路径超出工作区"):search_code(tmp_path, "../sample.py", "alpha")

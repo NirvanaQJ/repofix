@@ -1,5 +1,5 @@
 from pathlib import Path
-import ast
+import ast, hashlib
 
 def read_file(
     workspace: Path,
@@ -62,3 +62,35 @@ def list_symbols(
         elif isinstance(node, (ast.AsyncFunctionDef)):
             symbols.append({"name": node.name, "kind": "async_function", "line": node.lineno})
     return symbols
+
+def search_code(
+    workspace: Path,
+    relative_path: str,
+    query: str,
+    max_bytes: int = 65536,
+) -> list[dict]:
+    if type(query) is not str:
+        raise ValueError
+    if not query:
+        raise ValueError
+    text = read_file(workspace, relative_path, max_bytes)
+    matches = []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        if query in line:
+           matches.append({"line": line_no, "text": line})
+    return matches
+
+def read_file_at_version(
+    workspace: Path,
+    relative_path: str,
+    expected_sha256: str,
+    max_bytes: int = 65536,
+) -> str:
+    text = read_file(workspace, relative_path, max_bytes)
+    data = text.encode("utf-8")
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        raise ValueError("文件版本不匹配")
+    return text    
+    
+
+    

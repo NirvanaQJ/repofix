@@ -1,6 +1,6 @@
-import pytest
-from repofix.tools import read_file, run_read_file, list_symbols, search_code
-
+import pytest, hashlib
+from repofix.tools import read_file, run_read_file, list_symbols, search_code, read_file_at_version, validate_patch_targets
+from repofix.tools import parse_patch_numstat, check_patch_scope
 
 def test_read_file(tmp_path):
     (tmp_path / "sample.py").write_text("你好\n", encoding="utf-8")
@@ -131,3 +131,57 @@ def test_search_code_boundaries(tmp_path):
     with pytest.raises(ValueError,match="文件过大"):search_code(tmp_path, "sample.py", "alpha", 5)
     with pytest.raises(FileNotFoundError):search_code(tmp_path, "missing.py", "alpha")
     with pytest.raises(ValueError,match="路径超出工作区"):search_code(tmp_path, "../sample.py", "alpha")
+
+def test_read_file_at_version(tmp_path):
+    (tmp_path / "sample.py").write_text("你好\n", encoding="utf-8")
+    path=tmp_path / "sample.py"
+    data = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert read_file_at_version(tmp_path, "sample.py", data)=="你好\n"
+    (tmp_path / "sample.py").write_text("您好\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="文件版本不匹配"):read_file_at_version(tmp_path, "sample.py", data)
+
+
+def test_read_file_at_version_byte_limit(tmp_path):
+    (tmp_path / "sample.py").write_text("你", encoding="utf-8")
+    path=tmp_path / "sample.py"
+    data = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert read_file_at_version(tmp_path, "sample.py", data, max_bytes=3)=="你"
+    with pytest.raises(ValueError, match="文件过大"):read_file_at_version(tmp_path, "sample.py", data, max_bytes=2)
+    
+
+def test_validate_patch_targets():
+    allowed_paths = ["more_itertools/more.py"]
+    assert validate_patch_targets(["more_itertools/more.py"], allowed_paths) is None
+    
+    with pytest.raises(ValueError,match=r"tests/test_more\.py"):validate_patch_targets(["more_itertools/more.py","tests/test_more.py"],allowed_paths)
+
+def test_parse_patch_numstat():
+    output = b"1\t1\tsample.py\x00" + b"2\t0\tdir/other\tfile.py\x00"
+    assert parse_patch_numstat(output)==["sample.py", "dir/other\tfile.py"]
+
+def test_check_patch_scope(tmp_path):
+    sample = tmp_path / "sample.py"
+    other = tmp_path / "other.py"
+    sample.write_text("value = 1\n", encoding="utf-8")
+    other.write_text("value = 1\n", encoding="utf-8")
+    sample_patch = (
+    b"--- a/sample.py\n"
+    b"+++ b/sample.py\n"
+    b"@@ -1 +1 @@\n"
+    b"-value = 1\n"
+    b"+value = 2\n"
+)
+    other_patch = (
+    b"--- a/other.py\n"
+    b"+++ b/other.py\n"
+    b"@@ -1 +1 @@\n"
+    b"-value = 1\n"
+    b"+value = 2\n"
+)
+    allowed_paths = ["sample.py"]
+    assert check_patch_scope(tmp_path, sample_patch, allowed_paths) == ["sample.py"]
+
+    with pytest.raises(ValueError, match=r"other\.py"): check_patch_scope(tmp_path, sample_patch + other_patch, allowed_paths)
+    
+
+    

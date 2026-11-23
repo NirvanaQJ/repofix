@@ -1,5 +1,5 @@
 from pathlib import Path
-import ast, hashlib
+import ast, hashlib, subprocess
 
 def read_file(
     workspace: Path,
@@ -90,7 +90,45 @@ def read_file_at_version(
     data = text.encode("utf-8")
     if hashlib.sha256(data).hexdigest() != expected_sha256:
         raise ValueError("文件版本不匹配")
-    return text    
-    
+    return text
+
+def validate_patch_targets(
+    target_paths: list[str],
+    allowed_paths: list[str],
+) -> None:
+    for tmp in target_paths:
+        if tmp not in allowed_paths:
+            raise ValueError(f"补丁修改了未授权路径：{tmp}")
+
+    return    
+
+
+def parse_patch_numstat(output: bytes) -> list[str]:
+    output=output.split(b"\x00")
+    result=[]
+    for tmp in output:
+        if not tmp:
+            continue
+        _, _, path_bytes = tmp.split(b"\t", 2)
+        data=path_bytes.decode("utf-8")
+        result.append(data)
+    return result
+
+def check_patch_scope(
+    workspace: Path,
+    patch: bytes,
+    allowed_paths: list[str],
+) -> list[str]:
+    result = subprocess.run(
+    ["git", "apply", "--numstat", "-z", "-"],
+    cwd=workspace,
+    input=patch,
+    capture_output=True,
+    check=True,
+    )
+    patch_list=parse_patch_numstat(result.stdout)
+    validate_patch_targets(patch_list, allowed_paths)
+    return patch_list
+
 
     

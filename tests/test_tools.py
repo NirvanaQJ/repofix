@@ -1,3 +1,5 @@
+import subprocess
+
 import pytest, hashlib
 from repofix.tools import read_file, run_read_file, list_symbols, search_code, read_file_at_version, validate_patch_targets
 from repofix.tools import parse_patch_numstat, check_patch_scope
@@ -155,6 +157,11 @@ def test_validate_patch_targets():
     
     with pytest.raises(ValueError,match=r"tests/test_more\.py"):validate_patch_targets(["more_itertools/more.py","tests/test_more.py"],allowed_paths)
 
+def test_validate_rename_targets():
+    with pytest.raises(ValueError, match=r"new\.py"):validate_patch_targets(["old.py", "new.py"],["old.py"])
+    with pytest.raises(ValueError, match=r"old\.py"):validate_patch_targets(["old.py", "new.py"],["new.py"])
+    assert validate_patch_targets(["old.py", "new.py"],["old.py", "new.py"]) is None
+
 def test_parse_patch_numstat():
     output = b"1\t1\tsample.py\x00" + b"2\t0\tdir/other\tfile.py\x00"
     assert parse_patch_numstat(output)==["sample.py", "dir/other\tfile.py"]
@@ -182,6 +189,32 @@ def test_check_patch_scope(tmp_path):
     assert check_patch_scope(tmp_path, sample_patch, allowed_paths) == ["sample.py"]
 
     with pytest.raises(ValueError, match=r"other\.py"): check_patch_scope(tmp_path, sample_patch + other_patch, allowed_paths)
+    assert sample.read_text(encoding="utf-8")=="value = 1\n"
+    assert other.read_text(encoding="utf-8")=="value = 1\n"
+
     
+def test_check_patch_scope_rename(tmp_path):
+    patch_repo = tmp_path / "patch_repo"
+    patch_repo.mkdir()
+    contents = "value = 1\n"
+    (patch_repo / "old.py").write_text(contents, encoding="utf-8")
+
+    git = ["git", "-C", str(patch_repo)]
+    subprocess.run([*git, "init", "--quiet"], check=True)
+    subprocess.run([*git, "add", "old.py"], check=True)
+    base_tree = subprocess.check_output([*git, "write-tree"], text=True).strip()
+    subprocess.run([*git, "mv", "old.py", "new.py"], check=True)
+    patch = subprocess.check_output([*git, "diff", "--cached", "--find-renames", base_tree])
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_path = workspace / "old.py"
+    old_path.write_text(contents, encoding="utf-8")
+
+    targets = check_patch_scope(workspace, patch, ["old.py", "new.py"])
+
+    assert old_path.read_text(encoding="utf-8") == contents
+    assert not (workspace / "new.py").exists()
+    assert set(targets) == {"old.py", "new.py"}
 
     

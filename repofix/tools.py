@@ -113,6 +113,16 @@ def parse_patch_numstat(output: bytes) -> list[str]:
         data=path_bytes.decode("utf-8")
         result.append(data)
     return result
+def extract_rename_paths(lines: list[bytes]) -> list[bytes]:
+    
+    prefix = [b"rename from ",b"rename to "]
+    result = []
+    for prefix_ in prefix:
+       for line in lines:
+          if line.startswith(prefix_):
+             result.append(line[len(prefix_):])
+    return result
+
 
 def check_patch_scope(
     workspace: Path,
@@ -127,8 +137,14 @@ def check_patch_scope(
     check=True,
     )
     patch_list=parse_patch_numstat(result.stdout)
+    for path_bytes in extract_rename_paths(patch.split(b"\n")):
+        path = path_bytes.decode("utf-8")
+        if path not in patch_list:
+            patch_list.append(path)
+
     validate_patch_targets(patch_list, allowed_paths)
     return patch_list
 
+         
 
     

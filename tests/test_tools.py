@@ -1,8 +1,9 @@
 import subprocess
+import sys
 
 import pytest, hashlib
 from repofix.tools import read_file, run_read_file, list_symbols, search_code, read_file_at_version, validate_patch_targets
-from repofix.tools import parse_patch_numstat, check_patch_scope
+from repofix.tools import parse_patch_numstat, check_patch_scope, apply_patch, inspect_diff, run_test_profile
 
 def test_read_file(tmp_path):
     (tmp_path / "sample.py").write_text("你好\n", encoding="utf-8")
@@ -193,7 +194,8 @@ def test_check_patch_scope(tmp_path):
     assert other.read_text(encoding="utf-8")=="value = 1\n"
 
     
-def test_check_patch_scope_rename(tmp_path):
+@pytest.mark.parametrize("new_name", ["new.py", "草稿.py"])
+def test_check_patch_scope_rename(tmp_path, new_name):
     patch_repo = tmp_path / "patch_repo"
     patch_repo.mkdir()
     contents = "value = 1\n"
@@ -203,18 +205,107 @@ def test_check_patch_scope_rename(tmp_path):
     subprocess.run([*git, "init", "--quiet"], check=True)
     subprocess.run([*git, "add", "old.py"], check=True)
     base_tree = subprocess.check_output([*git, "write-tree"], text=True).strip()
-    subprocess.run([*git, "mv", "old.py", "new.py"], check=True)
-    patch = subprocess.check_output([*git, "diff", "--cached", "--find-renames", base_tree])
+    subprocess.run([*git, "mv", "old.py", new_name], check=True)
+    patch = subprocess.check_output([
+        *git, "-c", "core.quotePath=true",
+        "diff", "--cached", "--find-renames", base_tree,
+    ])
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     old_path = workspace / "old.py"
     old_path.write_text(contents, encoding="utf-8")
 
-    targets = check_patch_scope(workspace, patch, ["old.py", "new.py"])
+    targets = check_patch_scope(workspace, patch, ["old.py", new_name])
+    assert set(targets) == {"old.py", new_name}
+
+    with pytest.raises(ValueError, match=r"old\.py"):
+        check_patch_scope(workspace, patch, [new_name])
 
     assert old_path.read_text(encoding="utf-8") == contents
-    assert not (workspace / "new.py").exists()
-    assert set(targets) == {"old.py", "new.py"}
+    assert not (workspace / new_name).exists()
 
-    
+
+def test_apply_patch_checks_all_files_before_writing(tmp_path):
+    paths = ["sample.py", "other.py"]
+    original = b"value = 1\n"
+    expected_hash = hashlib.sha256(original).hexdigest()
+    versions = {path: expected_hash for path in paths}
+    for path in paths:
+        (tmp_path / path).write_bytes(original)
+
+    patch = "".join(
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "-value = 1\n"
+        "+value = 2\n"
+        for path in paths
+    ).encode("utf-8")
+
+    rejected_cases = [
+        (["sample.py"], versions, r"未授权路径：other\.py"),
+        (paths, {"sample.py": expected_hash}, None),
+        (paths, {**versions, "other.py": "0" * 64}, "文件版本不匹配"),
+    ]
+    for allowed_paths, expected_versions, message in rejected_cases:
+        with pytest.raises(ValueError, match=message):
+            apply_patch(tmp_path, patch, allowed_paths, expected_versions)
+        assert [(tmp_path / path).read_bytes() for path in paths] == [original, original]
+
+    assert apply_patch(tmp_path, patch, paths, versions) == paths
+    for path in paths:
+        assert (tmp_path / path).read_bytes() == b"value = 2\n"
+
+
+def test_inspect_diff_reads_patch_result(tmp_path):
+    sample = tmp_path / "sample.py"
+    original = b"value = 1\n"
+    sample.write_bytes(original)
+    git = ["git", "-C", str(tmp_path)]
+    subprocess.run([*git, "init", "--quiet"], check=True)
+    subprocess.run([*git, "add", "sample.py"], check=True)
+    subprocess.run([
+        *git, "-c", "user.name=RepoFix Test", "-c", "user.email=repofix@example.invalid",
+        "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "baseline",
+    ], check=True)
+
+    assert inspect_diff(tmp_path) == ""
+
+    patch = (
+        b"--- a/sample.py\n"
+        b"+++ b/sample.py\n"
+        b"@@ -1 +1 @@\n"
+        b"-value = 1\n"
+        b"+value = 2\n"
+    )
+    versions = {"sample.py": hashlib.sha256(original).hexdigest()}
+    apply_patch(tmp_path, patch, ["sample.py"], versions)
+
+    diff = inspect_diff(tmp_path)
+    assert "diff --git a/sample.py b/sample.py\n" in diff
+    assert "-value = 1\n+value = 2\n" in diff
+    assert sample.read_bytes() == b"value = 2\n"
+
+
+def test_run_test_profile_selects_registered_command_and_preserves_result(tmp_path):
+    (tmp_path / "sample.txt").write_text("workspace", encoding="utf-8")
+    profiles = {
+        "smoke": [
+            sys.executable, "-c",
+            "from pathlib import Path; print(Path('sample.txt').read_text(encoding='utf-8'))",
+        ],
+        "failure": [
+            sys.executable, "-c",
+            "import sys; print('failed', file=sys.stderr); raise SystemExit(1)",
+        ],
+    }
+
+    assert run_test_profile(tmp_path, "smoke", profiles) == {
+        "exit_code": 0, "stdout": "workspace\n", "stderr": "",
+    }
+    assert run_test_profile(tmp_path, "failure", profiles) == {
+        "exit_code": 1, "stdout": "", "stderr": "failed\n",
+    }
+    with pytest.raises(ValueError, match="未知测试配置：unknown"):
+        run_test_profile(tmp_path, "unknown", profiles)

@@ -113,15 +113,64 @@ def parse_patch_numstat(output: bytes) -> list[str]:
         data=path_bytes.decode("utf-8")
         result.append(data)
     return result
+def unquote_git_path(path: bytes) -> bytes:
+    if not path.startswith(b'"'):
+        return path
+    if len(path) < 2 or not path.endswith(b'"'):
+        raise ValueError("Git 路径缺少结束引号")
+
+    escapes = {
+        b"a": b"\a",
+        b"b": b"\b",
+        b"t": b"\t",
+        b"n": b"\n",
+        b"v": b"\v",
+        b"f": b"\f",
+        b"r": b"\r",
+        b'"': b'"',
+        b"\\": b"\\",
+    }
+    payload = path[1:-1]
+    decoded = bytearray()
+    index = 0
+
+    while index < len(payload):
+        current = payload[index]
+        if current == ord('"'):
+            raise ValueError("Git 路径包含未转义的引号")
+        if current != ord("\\"):
+            decoded.append(current)
+            index += 1
+            continue
+
+        marker = payload[index + 1:index + 2]
+        if marker in escapes:
+            decoded.extend(escapes[marker])
+            index += 2
+            continue
+
+        digits = payload[index + 1:index + 4]
+        if (
+            len(digits) != 3
+            or digits[0] not in b"0123"
+            or any(digit not in b"01234567" for digit in digits[1:])
+        ):
+            raise ValueError("Git 路径包含无效转义")
+
+        decoded.append(int(digits, 8))
+        index += 4
+
+    return bytes(decoded)
+
+
 def extract_rename_paths(lines: list[bytes]) -> list[bytes]:
-    
-    prefix = [b"rename from ",b"rename to "]
-    result = []
-    for prefix_ in prefix:
-       for line in lines:
-          if line.startswith(prefix_):
-             result.append(line[len(prefix_):])
-    return result
+    prefixes = (b"rename from ", b"rename to ")
+    paths = []
+    for prefix in prefixes:
+        for line in lines:
+            if line.startswith(prefix):
+                paths.append(unquote_git_path(line[len(prefix):]))
+    return paths
 
 
 def check_patch_scope(
@@ -145,6 +194,53 @@ def check_patch_scope(
     validate_patch_targets(patch_list, allowed_paths)
     return patch_list
 
-         
+def apply_patch(
+    workspace: Path,
+    patch: bytes,
+    allowed_paths: list[str],
+    expected_versions: dict[str, str],
+) -> list[str]:
+    documents = check_patch_scope(workspace, patch, allowed_paths)
+    for i in documents:
+        if i not in expected_versions:
+            raise ValueError
+        read_file_at_version(workspace, i, expected_versions[i])
 
-    
+    subprocess.run(
+    ["git", "apply", "-"],
+    cwd=workspace,
+    input=patch,
+    capture_output=True,
+    check=True,
+    )
+    return documents
+
+def inspect_diff(workspace: Path) -> str:
+    result = subprocess.run(
+        ["git", "diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--"],
+        cwd=workspace,
+        capture_output=True,
+        check=True,
+        )
+    return result.stdout.decode("utf-8")
+
+def run_test_profile(
+    workspace: Path,
+    profile_id: str,
+    profiles: dict[str, list[str]],
+    timeout_seconds: float = 30,
+) -> dict[str, int | str]:
+    if profile_id not in profiles:
+        raise ValueError(f"未知测试配置：{profile_id}")
+
+    argv = profiles[profile_id]
+    result = subprocess.run(
+        argv,
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_seconds
+    )
+    return {"exit_code":result.returncode,"stdout":result.stdout,"stderr":result.stderr}
+

@@ -1,3 +1,7 @@
+import hashlib
+import subprocess
+from collections import UserDict
+
 import pytest
 from repofix.gateway import validate_tool_arguments, dispatch_tool,run_tool, validate_search_arguments
 
@@ -207,4 +211,143 @@ def test_run_search_code(tmp_path):
                 "status": "error",
                 "content":None,
                 "error_code": "invalid_request",
-            }                                                    
+            }
+
+
+def test_dispatch_apply_patch_requires_trusted_context(tmp_path):
+    sample = tmp_path / "sample.py"
+    original = b"value = 1\n"
+    sample.write_bytes(original)
+    arguments = {
+        "patch": (
+            "--- a/sample.py\n"
+            "+++ b/sample.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    }
+    allowed_paths = ["sample.py"]
+    expected_versions = {"sample.py": hashlib.sha256(original).hexdigest()}
+
+    with pytest.raises(ValueError, match="缺少补丁执行所需的参数"):
+        dispatch_tool(tmp_path, "apply_patch", arguments, allowed_paths=allowed_paths)
+    with pytest.raises(ValueError, match="缺少补丁执行所需的参数"):
+        dispatch_tool(tmp_path, "apply_patch", arguments, expected_versions=expected_versions)
+
+    for field, value in (
+        ("allowed_paths", allowed_paths),
+        ("expected_versions", expected_versions),
+    ):
+        with pytest.raises(ValueError, match="只能包含 patch"):
+            dispatch_tool(
+                tmp_path, "apply_patch", {**arguments, field: value},
+                allowed_paths=allowed_paths, expected_versions=expected_versions,
+            )
+    assert sample.read_bytes() == original
+
+    assert dispatch_tool(
+        tmp_path, "apply_patch", arguments,
+        allowed_paths=allowed_paths, expected_versions=expected_versions,
+    ) == ["sample.py"]
+    assert sample.read_bytes() == b"value = 2\n"
+
+
+@pytest.mark.parametrize(
+    "patch_text",
+    [
+        "not a patch\n",
+        (
+            "--- a/sample.py\n"
+            "+++ b/sample.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 99\n"
+            "+value = 2\n"
+        ),
+    ],
+    ids=["invalid_format", "old_line_does_not_match"],
+)
+def test_run_apply_patch_reports_git_failure(tmp_path, patch_text):
+    sample = tmp_path / "sample.py"
+    original = b"value = 1\n"
+    sample.write_bytes(original)
+    expected_versions = {"sample.py": hashlib.sha256(original).hexdigest()}
+
+    result = run_tool(
+        tmp_path, "apply_patch", {"patch": patch_text},
+        allowed_paths=["sample.py"], expected_versions=expected_versions,
+    )
+
+    assert result == {"status": "error", "content": None, "error_code": "patch_failed"}
+    assert sample.read_bytes() == original
+
+
+def test_run_apply_patch_returns_structured_result(tmp_path):
+    sample = tmp_path / "sample.py"
+    original = b"value = 1\n"
+    sample.write_bytes(original)
+    arguments = {
+        "patch": (
+            "--- a/sample.py\n"
+            "+++ b/sample.py\n"
+            "@@ -1 +1 @@\n"
+            "-value = 1\n"
+            "+value = 2\n"
+        ),
+    }
+    allowed_paths = ["sample.py"]
+    expected_versions = {"sample.py": hashlib.sha256(original).hexdigest()}
+    rejected = {"status": "error", "content": None, "error_code": "invalid_request"}
+
+    assert run_tool(tmp_path, "apply_patch", arguments) == rejected
+    assert run_tool(
+        tmp_path, "apply_patch", {**arguments, "allowed_paths": allowed_paths},
+        allowed_paths=allowed_paths, expected_versions=expected_versions,
+    ) == rejected
+    assert sample.read_bytes() == original
+
+    assert run_tool(
+        tmp_path, "apply_patch", arguments,
+        allowed_paths=allowed_paths, expected_versions=expected_versions,
+    ) == {"status": "ok", "content": ["sample.py"], "error_code": None}
+    assert sample.read_bytes() == b"value = 2\n"
+
+
+def test_run_inspect_diff_returns_structured_result(tmp_path):
+    git = ["git", "-C", str(tmp_path)]
+    subprocess.run([*git, "init", "--quiet"], check=True)
+
+    for arguments in (None, {"relative_path": "sample.py"}, UserDict()):
+        assert run_tool(tmp_path, "inspect_diff", arguments) == {
+            "status": "error", "content": None, "error_code": "invalid_request",
+        }
+    assert run_tool(tmp_path, "inspect_diff", {}) == {
+        "status": "error", "content": None, "error_code": "diff_failed",
+    }
+
+    sample = tmp_path / "sample.py"
+    original = b"value = 1\n"
+    sample.write_bytes(original)
+    subprocess.run([*git, "add", "sample.py"], check=True)
+    subprocess.run([
+        *git, "-c", "user.name=RepoFix Test", "-c", "user.email=repofix@example.invalid",
+        "-c", "commit.gpgSign=false", "commit", "--quiet", "-m", "baseline",
+    ], check=True)
+    assert run_tool(tmp_path, "inspect_diff", {}) == {
+        "status": "ok", "content": "", "error_code": None,
+    }
+
+    patch = (
+        "--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n"
+        "-value = 1\n+value = 2\n"
+    )
+    assert run_tool(
+        tmp_path, "apply_patch", {"patch": patch},
+        allowed_paths=["sample.py"],
+        expected_versions={"sample.py": hashlib.sha256(original).hexdigest()},
+    )["status"] == "ok"
+    result = run_tool(tmp_path, "inspect_diff", {})
+    assert result["status"] == "ok"
+    assert result["error_code"] is None
+    assert "-value = 1\n+value = 2\n" in result["content"]
+    assert sample.read_bytes() == b"value = 2\n"

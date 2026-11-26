@@ -4,6 +4,7 @@ import sys
 import pytest, hashlib
 from repofix.tools import read_file, run_read_file, list_symbols, search_code, read_file_at_version, validate_patch_targets
 from repofix.tools import parse_patch_numstat, check_patch_scope, apply_patch, inspect_diff, run_test_profile
+from repofix.tools import build_test_container_argv
 
 def test_read_file(tmp_path):
     (tmp_path / "sample.py").write_text("你好\n", encoding="utf-8")
@@ -286,6 +287,36 @@ def test_inspect_diff_reads_patch_result(tmp_path):
     assert "diff --git a/sample.py b/sample.py\n" in diff
     assert "-value = 1\n+value = 2\n" in diff
     assert sample.read_bytes() == b"value = 2\n"
+
+
+def test_build_test_container_argv_preserves_argument_boundaries(tmp_path):
+    workspace = tmp_path / "RepoFix demo"
+    image = "python:3.14"
+    command = ["python", "-c", "print('hello world')"]
+
+    default_argv = [
+        "docker", "run",
+        "--network", "none",
+        "--user", "65534:65534",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--rm",
+        "--pull", "never",
+        "--cpus", "1",
+        "--memory", "2g",
+        "--memory-swap", "2g",
+        "--pids-limit", "64",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
+        "--mount", f"type=bind,src={workspace},dst=/workspace,readonly",
+        "--workdir", "/workspace",
+        image, "python", "-c", "print('hello world')",
+    ]
+    assert build_test_container_argv(workspace, image, command) == default_argv
+    assert build_test_container_argv(
+        workspace, image, command, container_name="repofix-smoke",
+    ) == [*default_argv[:2], "--name", "repofix-smoke", *default_argv[2:]]
+    assert command == ["python", "-c", "print('hello world')"]
 
 
 def test_run_test_profile_selects_registered_command_and_preserves_result(tmp_path):

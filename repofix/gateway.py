@@ -1,5 +1,5 @@
 from pathlib import Path
-from repofix.tools import read_file, list_symbols, search_code, apply_patch, inspect_diff, run_test_profile
+from repofix.tools import read_file, list_symbols, search_code, apply_patch, inspect_diff, run_test_profile, TestContainerCleanupError
 import subprocess
 def validate_tool_arguments(
     arguments: object,
@@ -37,7 +37,9 @@ def dispatch_tool(
         *,
         allowed_paths: list[str] | None = None,
         expected_versions: dict[str, str] | None = None,
-        test_profiles: dict[str, list[str]] | None = None
+        test_profiles: dict[str, list[str]] | None = None,
+        test_timeout_seconds: float = 30,
+        test_container_image: str | None = None
 ) -> str | list[dict] | list[str]:
     
     if type(name) is not str:
@@ -71,7 +73,7 @@ def dispatch_tool(
         if test_profiles is None:
             raise ValueError("缺少测试配置表")
 
-        return run_test_profile(workspace, profile_id, test_profiles)
+        return run_test_profile(workspace, profile_id, test_profiles,timeout_seconds=test_timeout_seconds,container_image=test_container_image)
 
     if name == "search_code":
         validated = validate_search_arguments(arguments)
@@ -87,7 +89,9 @@ def run_tool(
     *,
     allowed_paths: list[str] | None = None,
     expected_versions: dict[str, str] | None = None,
-    test_profiles: dict[str, list[str]] | None = None
+    test_profiles: dict[str, list[str]] | None = None,
+    test_timeout_seconds: float = 30,
+    test_container_image: str | None = None
 ) -> dict[str, object]:
     try:
         result = dispatch_tool(
@@ -96,7 +100,9 @@ def run_tool(
            arguments,
            allowed_paths=allowed_paths,
            expected_versions=expected_versions,
-           test_profiles=test_profiles
+           test_profiles=test_profiles,
+           test_timeout_seconds=test_timeout_seconds,
+           test_container_image=test_container_image,
          )
     except FileNotFoundError:
         return {"status": "error", "content": None, "error_code": "file_not_found"}
@@ -107,7 +113,15 @@ def run_tool(
     except ValueError:
         return {"status": "error", "content": None, "error_code": "invalid_request"}
     except OSError:
-        return {"status": "error", "content": None, "error_code": "io_error"} 
+        return {"status": "error", "content": None, "error_code": "io_error"}
+    except TestContainerCleanupError:
+        return {
+            "status": "error",
+            "content": None,
+            "error_code": "test_cleanup_failed",
+        }
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "content": None, "error_code": "timeout"}
     except subprocess.CalledProcessError:
         if name =="inspect_diff":
             return {"status": "error", "content": None, "error_code": "diff_failed"}

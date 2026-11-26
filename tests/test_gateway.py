@@ -1,5 +1,6 @@
 import hashlib
 import subprocess
+import sys
 from collections import UserDict
 
 import pytest
@@ -351,3 +352,104 @@ def test_run_inspect_diff_returns_structured_result(tmp_path):
     assert result["error_code"] is None
     assert "-value = 1\n+value = 2\n" in result["content"]
     assert sample.read_bytes() == b"value = 2\n"
+
+
+def test_run_test_profile_preserves_exit_codes_and_rejects_invalid_requests(tmp_path):
+    profiles = {
+        "smoke": [sys.executable, "-c", "print('ready')"],
+        "failure": [
+            sys.executable, "-c",
+            "import sys; print('failed', file=sys.stderr); sys.exit(1)",
+        ],
+    }
+    name = "run_test_profile"
+    smoke = {"profile_id": "smoke"}
+    rejected = {"status": "error", "content": None, "error_code": "invalid_request"}
+
+    assert run_tool(tmp_path, name, smoke, test_profiles=profiles) == {
+        "status": "ok",
+        "content": {"exit_code": 0, "stdout": "ready\n", "stderr": ""},
+        "error_code": None,
+    }
+    assert run_tool(tmp_path, name, {"profile_id": "failure"}, test_profiles=profiles) == {
+        "status": "ok",
+        "content": {"exit_code": 1, "stdout": "", "stderr": "failed\n"},
+        "error_code": None,
+    }
+
+    assert run_tool(tmp_path, name, smoke) == rejected
+    for arguments in ({}, {"profile_id": ""}, {"profile_id": 1},
+                      {"profile_id": "unknown"}, {**smoke, "argv": []}):
+        assert run_tool(tmp_path, name, arguments, test_profiles=profiles) == rejected
+
+
+def test_run_test_profile_reports_timeout(tmp_path):
+    profiles = {"slow": [sys.executable, "-c", "import time; time.sleep(2)"]}
+    name = "run_test_profile"
+    arguments = {"profile_id": "slow"}
+
+    assert run_tool(
+        tmp_path, name, arguments, test_profiles=profiles, test_timeout_seconds=0.2,
+    ) == {"status": "error", "content": None, "error_code": "timeout"}
+    assert run_tool(
+        tmp_path, name, {**arguments, "test_timeout_seconds": 300},
+        test_profiles=profiles, test_timeout_seconds=0.2,
+    ) == {"status": "error", "content": None, "error_code": "invalid_request"}
+
+
+def test_container_test_profile_forwards_trusted_image_and_preserves_failure(tmp_path, monkeypatch):
+    commands = []
+
+    def run_docker(argv, **kwargs):
+        commands.append(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "failed\n")
+
+    monkeypatch.setattr("repofix.tools.subprocess.run", run_docker)
+    profiles = {"smoke": ["python", "-V"]}
+    image = "python:3.14"
+    arguments = {"profile_id": "smoke"}
+
+    result = run_tool(
+        tmp_path, "run_test_profile", arguments, test_profiles=profiles, test_container_image=image,
+    )
+    assert result == {
+        "status": "ok",
+        "content": {"exit_code": 1, "stdout": "", "stderr": "failed\n"},
+        "error_code": None,
+    }
+    rejected = run_tool(
+        tmp_path, "run_test_profile", {**arguments, "test_container_image": "other"},
+        test_profiles=profiles, test_container_image=image,
+    )
+    assert rejected == {"status": "error", "content": None, "error_code": "invalid_request"}
+    assert len(commands) == 1
+    assert commands[0][:3] == ["docker", "run", "--name"]
+    assert commands[0][-3:] == [image, "python", "-V"]
+
+
+@pytest.mark.parametrize("cleanup_error", [None, "exit", "timeout"])
+def test_container_test_profile_cleans_up_the_named_container(tmp_path, monkeypatch, cleanup_error):
+    calls = []
+
+    def run_docker(argv, *, timeout, check, **kwargs):
+        calls.append((argv, timeout, check))
+        if argv[1] == "run" or cleanup_error == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        if cleanup_error == "exit":
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("repofix.tools.subprocess.run", run_docker)
+    result = run_tool(
+        tmp_path, "run_test_profile", {"profile_id": "slow"},
+        test_profiles={"slow": ["python", "-V"]}, test_container_image="python:3.14",
+        test_timeout_seconds=0.2,
+    )
+
+    expected_code = "timeout" if cleanup_error is None else "test_cleanup_failed"
+    assert result == {"status": "error", "content": None, "error_code": expected_code}
+    (launch, run_timeout, run_check), cleanup = calls
+    assert launch[:3] == ["docker", "run", "--name"]
+    assert launch[3].startswith("repofix-test-")
+    assert (run_timeout, run_check) == (0.2, False)
+    assert cleanup == (["docker", "rm", "--force", launch[3]], 5, True)

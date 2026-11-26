@@ -1,5 +1,5 @@
 from pathlib import Path
-import ast, hashlib, subprocess
+import ast, hashlib, subprocess, uuid
 
 def read_file(
     workspace: Path,
@@ -224,23 +224,74 @@ def inspect_diff(workspace: Path) -> str:
         )
     return result.stdout.decode("utf-8")
 
+def build_test_container_argv(
+    workspace: Path,
+    image: str,
+    argv: list[str],
+    *,
+    container_name: str | None = None,
+) -> list[str]:
+    name_args = ["--name", container_name] if container_name is not None else []
+    return [
+        "docker", "run", *name_args,
+        "--network", "none",
+        "--user", "65534:65534",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--rm",
+        "--pull", "never",
+        "--cpus", "1",
+        "--memory", "2g",
+        "--memory-swap", "2g",
+        "--pids-limit", "64",
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777",
+        "--mount", f"type=bind,src={workspace},dst=/workspace,readonly",
+        "--workdir", "/workspace",
+        image, *argv,
+    ]
+
+class TestContainerCleanupError(RuntimeError):
+    pass
 def run_test_profile(
     workspace: Path,
     profile_id: str,
     profiles: dict[str, list[str]],
     timeout_seconds: float = 30,
+    *, container_image: str | None = None
 ) -> dict[str, int | str]:
     if profile_id not in profiles:
         raise ValueError(f"未知测试配置：{profile_id}")
 
     argv = profiles[profile_id]
-    result = subprocess.run(
+    container_name = None
+    if container_image is not None:
+        container_name = f"repofix-test-{uuid.uuid4().hex}"
+        argv = build_test_container_argv(
+            workspace, container_image, argv,
+            container_name=container_name,
+        )
+    try:
+      result = subprocess.run(
         argv,
         cwd=workspace,
         capture_output=True,
         text=True,
         check=False,
         timeout=timeout_seconds
-    )
-    return {"exit_code":result.returncode,"stdout":result.stdout,"stderr":result.stderr}
+       )
+    except subprocess.TimeoutExpired:
+        if container_name is not None:
+            try:
+                subprocess.run(
+                    ["docker", "rm", "--force", container_name],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise TestContainerCleanupError(container_name) from exc
+        raise
+    return {"exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
 
